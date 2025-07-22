@@ -1,8 +1,8 @@
 /** @type {import("pliny/config").PlinyConfig } */
 const siteMetadata = {
-  title: 'Henry Leong‘s Late- Night Tavern',
+  title: 'Henry Leong‘s Late-Night Tavern',
   author: 'Henry Leong',
-  headerTitle: 'Late- Night Tavern',
+  headerTitle: 'Late-Night Tavern',
   description:
     '深夜灵感酒馆，目前我正喝着酒记录我的技术项目与思想实验，欢迎交流！Late night inspiration tavern, I am currently drinking and recording my technical projects and thought experiments, welcome to exchange!',
   language: 'zh-CN',
