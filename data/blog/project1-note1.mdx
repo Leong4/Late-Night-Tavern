@@ -1,0 +1,116 @@
+---
+title: LLM 技术趋势雷达（一）：从0到1打造高信噪数据采集层
+date: 2025-08-05
+tags: ['项目日志', 'LLM 技术趋势雷达', 'LLM', '数据采集']
+summary: 欢迎来到我的深夜酒馆～本文记录了 LLM 技术趋势雷达系统在数据采集阶段的设计思考、技术实现与工程踩坑，聚焦于数据信噪比控制、持久化策略、接口规范与异步抓取机制。
+---
+
+## 1. 背景与目标
+
+LLM 技术更新飞快，光是关注 arXiv 和 GitHub 热门库都显得力不从心。做这个「技术趋势雷达系统」的初衷，就是帮自己构建一套能自动发现 _真正有价值的技术信号_ 的工具。
+
+数据采集是整个系统的第一步 —— 如果这一层抓的就是垃圾数据，那后面的摘要、可视化、推荐系统也都无从谈起。所以这篇文章专注于：如何在数据抓取阶段控制信噪比，如何为系统后续打好“结构化”与“可扩展”的地基。
+
+---
+
+## 2. 数据噪声控制：思考 & 方案
+
+纯靠关键词抓数据，信息量大但质量参差 —— 太杂了。所以我决定采用 **混合策略**：
+
+- **硬阈值筛选（A）**：引用数 >5、GitHub Stars >10
+- **灰名单机制（B）**：保留一些边缘词条（如“prompt compression”）做动态观察，不立即丢弃
+
+比如 arXiv 的引用数太低，意味着论文可能还未被社区接受。设定为 >5，是为了保证它已经“进入讨论场”。
+
+⚠️⚠️但是想法总是很美好的，在实际运行下来才发现，最新的arxiv的文章引用数基本都是为0，github上面也很少有stars，这就是时效性和专业性的取舍，当我想要时效性时，发现硬阈值筛选这个方法其实不太现实。但是经过思考后我决定后面调整策略，最新的文章暂时先不做引用数的限制，等过一段时间之后再重新清洗一遍数据，这样可以保证论文的实效性和重要性。
+
+---
+
+## 3. 持久化策略：本地先行，云端可拓展
+
+本阶段优先追求快速验证，所以用了 **SQLite + DuckDB 混合持久化**：
+
+- **SQLite** 存结构化元信息（如文章标题、来源、摘要）
+- **DuckDB** 做后续的轻量查询和临时分析
+
+路径管理也做了优化：如果文件夹不存在，系统会自动 `os.makedirs()`，并允许在 `.env` 中配置根目录位置，方便后续迁移。
+
+未来如果项目成长，打算将这套结构迁移到 Supabase（PostgreSQL），目前的 schema 和接口结构已经做了兼容设计。
+
+---
+
+## 4. 接口契约与 Schema 设计
+
+用的是 **Pydantic + SQLAlchemy** 的组合方案，主要考虑是：
+
+- PaperSchema 用来在抓取、API、单元测试里保证字段一致；
+- PaperORM 用来写库、查询。字段名称 100 % 对齐，所以模型 ↔ 数据库 无缝切换。
+- Schema 可导出为前端用的 OpenAPI 文档（未来计划）
+- 字段已与 SQLite 表保持一致，在拆分出的 `db/models.py` 中通过 SQLAlchemy ORM 自动映射。
+
+当前的 `PaperSchema` 字段如下（节选）：
+
+```python
+class PaperSchema(BaseModel):
+    arxiv_id: str
+    title: str
+    authors: List[str]
+    published: datetime
+    citations: int | None = None
+    pdf_url: str | None = None
+    pdf_path: str | None = None
+    status: str = "gray"          # gray / full
+    last_checked: datetime = Field(default_factory=datetime.utcnow)
+    gray_reason: str | None = None
+    source_type: str = "arxiv"    # arxiv / github
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    lang: str | None = None
+```
+
+---
+
+## 5. Fetch：同步 vs. 异步
+
+最初的爬虫是串行写法，简单但慢。尤其是涉及到多源（如 arXiv、Hugging Face、Semantic Scholar）时，网络 I/O 是瓶颈。
+
+因此我重写了整个 fetch 模块为 **异步架构**，核心使用 `httpx.AsyncClient + asyncio + Semaphore`：
+
+这是我在写项目过程中的一个盲区，我的学习与思考可以参考另一个文章：LLM 技术趋势雷达：关于Fetch的思考
+
+---
+
+## 6. 踩坑 & 报错解决
+
+| 报错 / Warning                        | 触发场景                  | 解决办法                       |
+| ------------------------------------- | ------------------------- | ------------------------------ |
+| `unable to open database file`        | 外接硬盘路径不存在        | 自动 mkdir 并转换为绝对路径    |
+| `QueryParams.decode()` AttributeError | URL 拼接方式不对          | 改为 `str(QueryParams({...}))` |
+| `Session` 不支持异步上下文            | ORM 搭配异步用法不对      | 每个协程内独立初始化 Session   |
+| `429 Too Many Requests`               | Semantic Scholar 并发过高 | Semaphore 限流 + 可选 API Key  |
+
+---
+
+## 7. 阶段总结与下一步
+
+**已完成：**
+
+- 基于引用数的硬筛规则
+- 多源爬虫整合,留下方便的后续扩展（arXiv, GitHub）
+- 灰名单机制
+- 异步抓取机制与数据库持久化
+- 初步接口契约 & schema 定型
+
+**待优化：**
+
+- 抓取频率与策略自动调节
+
+**下一阶段：**
+将进入文本预处理阶段，主要工作包括：
+
+- HTML 清洗
+- 内容分块
+- 嵌入生成与去重策略试验
+
+---
+
+欢迎持续关注这个项目的进展，我会在本站持续更新后续开发笔记与心得。也欢迎通过 [GitHub](https://github.com/Leong4) 联系我交流！

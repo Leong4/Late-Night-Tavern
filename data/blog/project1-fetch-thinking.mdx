@@ -1,0 +1,85 @@
+---
+title: LLM 技术趋势雷达：关于Fetch的思考
+date: 2025-08-05
+tags: ['学习思考', 'LLM 技术趋势雷达', 'Fetch', '数据采集']
+summary: halo欢迎来到我的深夜酒馆～本文记录了 LLM 技术趋势雷达系统在Fetch部分我的学习和思考，希望让你能有所收获。
+---
+
+## 1. 同步与异步：为什么选择 httpx.AsyncClient？
+
+核心目标是提升并发能力。在抓取 GitHub、arXiv 这类请求延迟小但频率高的场景里，异步能有效减少等待时间，释放线程资源，提高整体吞吐效率。相比于传统 `requests` 方式，`httpx.AsyncClient` 允许我们非阻塞地发出多个请求，是构建高性能抓取模块的关键。
+
+如果强行用同步代码实现并发，我们通常要用线程池控制，比如：
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+with ThreadPoolExecutor(max_workers=10) as pool:
+    results = list(pool.map(fetch_arxiv_batch_sync, url_list))
+```
+
+这样虽然也能并发执行，但会引入额外的内存和线程开销，还增加了调度复杂度。因此我们选择了原生异步方案。
+
+---
+
+## 2. 并发控制：为什么使用 asyncio.Semaphore？
+
+为了防止 API 限速，我们为每个抓取模块（如 `arxiv.py`、`github.py`）都加了并发控制：
+
+```python
+semaphore = asyncio.Semaphore(5)
+
+async def safe_fetch(...):
+    async with semaphore:
+        return await actual_fetch(...)
+```
+
+这个结构能让系统一开始最多只运行 5 个抓取任务，之后每完成一个才放行下一个。结合 retry 机制之后，能有效避免出现大量 `429 Too Many Requests` 的 warning，也让整个抓取系统运行更平稳。
+
+---
+
+## 3. fetch\_\*\_batch 的职责定位：为什么要纯函数？
+
+我们坚持将 `fetch_arxiv_batch()`、`fetch_github_batch()` 设计成“纯数据函数”——即只返回 `List[PaperSchema]`，不做数据库写入或 PDF 下载。原因有三：
+
+- **易测试**：单元测试只看输入输出，副作用少；
+- **低耦合**：和数据库、磁盘解耦，便于后期切换后处理方式；
+- **可组合**：所有 fetch 函数都可以统一调度、合并、缓存，方便管理。
+
+---
+
+## 4. 新源接入：如何保证一致性与规范性？
+
+为了保持项目可扩展性，每个新数据源都需要：
+
+- 单独建模块，如 `llm_radar/fetch/reddit.py`
+- 函数命名统一为 `fetch_xxx_batch()`
+- 返回类型严格为 `List[PaperSchema]`，并为异步纯函数
+
+例如：
+
+```python
+async def fetch_reddit_batch() -> List[PaperSchema]:
+    ...
+```
+
+我们还允许使用工具函数（如 `parse_citation()`、`async_retry()`）来统一抓取逻辑，并鼓励每个源都加上 Semaphore 限流机制。
+
+---
+
+## 5. 异步开发的一些注意事项
+
+- 异步函数必须 `await` 调用，不支持同步直接跑
+- 多任务用 `asyncio.gather()` 批量调度
+- 如果是在 Jupyter 这类环境运行，需要加上 `nest_asyncio` 来兼容
+
+---
+
+## 6. 总结
+
+- 我们选择了 `httpx.AsyncClient` 替代 `requests`，实现非阻塞爬虫；
+- 用 `asyncio.Semaphore` 控制并发，有效避免 API 被限速；
+- 所有抓取函数遵循统一结构和契约，便于测试与调度；
+- 整体结构已为后续新源扩展、缓存支持、数据清洗预留了空间。
+
+这部分是整个雷达系统的底层基础，虽然看似琐碎，但每一个细节都会影响系统后期的性能与维护成本。
